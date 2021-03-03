@@ -9,6 +9,13 @@ import (
 	"lukechampine.com/frand"
 )
 
+// func main() {
+// 	circuit := crt.NewCircuit(2, 1)
+// 	circuit.AddPart(crt.OR, [2]int{0, 0}, [2]int{1, 0})
+// 	circuit.SetOutputInput(0, 2, 0)
+// 	circuit.Save("haha")
+// }
+
 func main() {
 	// samples := []Sample{
 	// 	// 2 bit adder
@@ -57,7 +64,7 @@ func main() {
 	// TODO: parts with more than one output??
 	// how to attach to another later part input
 
-	algo := &MTGeneticAlgorithm{Threads: 40, MaxSurvivors: 255, CircuitPartFactory: factory}
+	algo := &MTGeneticAlgorithm{Threads: 20, MaxSurvivors: 103, CircuitPartFactory: factory}
 	algo.Execute(100000000, samples, nil)
 }
 
@@ -294,7 +301,7 @@ func (algo *GeneticAlgorithm) Epoch(original []*Individual, samples []Sample) ([
 				continue
 			}
 
-			population = append(population, individual.Mate(other)...)
+			population = append(population, individual.Mate(other, ft)...)
 		}
 	}
 
@@ -440,65 +447,81 @@ type Individual struct {
 	circuit *crt.Circuit
 }
 
-func (individual *Individual) Mate(other *Individual) (children []*Individual) {
-	a, b := individual.Clone(), other.Clone()
-	cutA := a.circuit.NInputs() + frand.Intn(a.circuit.NParts()-a.circuit.NInputs())
-	cutB := b.circuit.NInputs() + frand.Intn(b.circuit.NParts()-b.circuit.NInputs())
+func (individual *Individual) Mate(other *Individual, ft FitnessTracker) (children []*Individual) {
+	mate := func() *Individual {
+		a, b := individual.Clone(), other.Clone()
 
-	// aHEAD + bTAIL
-	{
-		clone := a.Clone()
+		var aOutputs, bOutputs []int
 
-		bParts := b.circuit.GetParts()
-		bParts = bParts[cutB:]
+		anf, bnf := ft.Get(individual).Float64(), ft.Get(other).Float64()
+		anf, bnf = anf/(anf+bnf), bnf/(anf+bnf)
 
-		for i := range bParts {
-			for j := range bParts[i].Inputs {
-				bParts[i].Inputs[j] = frand.Intn(cutA - 1 + i)
+		for i := 0; i < individual.circuit.NOutputs(); i++ {
+			if anf > frand.Float64() {
+				aOutputs = append(aOutputs, i)
+				continue
+			}
+			bOutputs = append(bOutputs, i)
+		}
+
+		buildForOutputs := func(outputsIdxs []int, circuit, child *crt.Circuit) {
+			var tmpset IntSet
+			var tmpstack IntStack
+
+			// build paths that lead to all outputsIdxs
+			outputs := circuit.GetOutputs()
+			for _, oidx := range outputsIdxs {
+				for _, itupl := range outputs[oidx].Inputs {
+					if tmpset.Contains(itupl[0]) {
+						continue
+					}
+					tmpset.Add(itupl[0])
+					tmpstack.Add(itupl[0])
+				}
+			}
+
+			childParts := child.GetParts()
+
+			circuitParts := circuit.GetParts()
+
+			for !tmpstack.Empty() {
+				partIdx := tmpstack.Pop()
+				part := circuitParts[partIdx].Part
+				inputs := make([][2]int, part.NInputs())
+
+				for i := 0; i < part.NInputs(); i++ {
+					itupl := circuitParts[partIdx].Inputs[i]
+
+					if itupl[0] < circuit.NInputs() {
+						inputs[i] = itupl
+						continue
+					}
+
+					inputs[i][0] = len(childParts) - part.NInputs() + i // is the order correct? or should be reverse?
+					inputs[i][1] = itupl[1]
+				}
+
+				cpwc := crt.CircuitPartWithConnections{Part: part, Inputs: inputs}
+				childParts = append(childParts, cpwc)
+				child.AddPart(part, inputs...)
+			}
+
+			for _, oidx := range outputsIdxs {
+				inputIdx := frand.Intn(len(childParts))
+				outputIdx := frand.Intn(childParts[inputIdx].Part.NOutputs())
+				child.SetOutputInput(oidx, inputIdx, outputIdx)
 			}
 		}
 
-		headParts := clone.circuit.GetParts()[:cutA]
-		clone.circuit.SetParts(append(headParts, bParts...))
+		child := crt.NewCircuit(a.circuit.NInputs(), a.circuit.NOutputs())
+		buildForOutputs(aOutputs, a.circuit, child)
+		buildForOutputs(bOutputs, b.circuit, child)
 
-		for j := 0; j < 8; j++ {
-			cloneJ := clone.Clone()
-
-			outputs := cloneJ.circuit.GetOutputs()
-			for i := range outputs {
-				outputs[i].Inputs[0] = frand.Intn(cloneJ.circuit.NParts())
-			}
-
-			children = append(children, cloneJ)
-		}
+		return &Individual{circuit: child}
 	}
 
-	// bHEAD + aTAIL
-	{
-		clone := b.Clone()
-
-		aParts := a.circuit.GetParts()
-		aParts = aParts[cutA:]
-
-		for i := range aParts {
-			for j := range aParts[i].Inputs {
-				aParts[i].Inputs[j] = frand.Intn(cutB - 1 + i)
-			}
-		}
-
-		headParts := clone.circuit.GetParts()[:cutB]
-		clone.circuit.SetParts(append(headParts, aParts...))
-
-		for j := 0; j < 8; j++ {
-			cloneJ := clone.Clone()
-
-			outputs := cloneJ.circuit.GetOutputs()
-			for i := range outputs {
-				outputs[i].Inputs[0] = frand.Intn(cloneJ.circuit.NParts())
-			}
-
-			children = append(children, cloneJ)
-		}
+	for i := 0; i < 16; i++ {
+		children = append(children, mate())
 	}
 
 	return
@@ -508,16 +531,19 @@ func (individual *Individual) Mutate(factory *CircuitPartFactory) *Individual {
 	clone := individual.Clone()
 
 	for {
-		idx := frand.Intn(clone.circuit.NParts())
-
-		if idx < clone.circuit.NInputs() {
-			continue
-		}
-
 		chance := frand.Float64()
 		switch {
 		case chance < 0.33:
+			var idx int
+			for {
+				idx = frand.Intn(clone.circuit.NParts())
+				if idx >= clone.circuit.NInputs() {
+					break
+				}
+			}
+
 			parts := clone.circuit.GetParts()
+
 			for {
 				random := factory.RandomCircuitPart()
 
@@ -529,10 +555,14 @@ func (individual *Individual) Mutate(factory *CircuitPartFactory) *Individual {
 				case random.NInputs() == parts[idx].Part.NInputs():
 					parts[idx].Part = random
 				case random.NInputs() != parts[idx].Part.NInputs():
-					var inputs []int
+					var inputs [][2]int
+
 					for len(inputs) < random.NInputs() {
-						inputs = append(inputs, frand.Intn(parts[idx].Part.NInputs()))
+						inputIdx := frand.Intn(idx)
+						outputIdx := frand.Intn(parts[inputIdx].Part.NOutputs())
+						inputs = append(inputs, [2]int{inputIdx, outputIdx})
 					}
+
 					parts[idx].Part = random
 					parts[idx].Inputs = inputs
 				}
@@ -541,14 +571,26 @@ func (individual *Individual) Mutate(factory *CircuitPartFactory) *Individual {
 			}
 			clone.circuit.SetParts(parts)
 		case chance >= 0.33 && chance < 0.67:
+			var idx int
+			for {
+				idx = frand.Intn(clone.circuit.NParts())
+				if idx >= clone.circuit.NInputs() {
+					break
+				}
+			}
+
 			parts := clone.circuit.GetParts()
 			input := frand.Intn(len(parts[idx].Inputs))
-			parts[idx].Inputs[input] = frand.Intn(idx)
+			inputIdx := frand.Intn(idx)
+			outputIdx := frand.Intn(parts[inputIdx].Part.NOutputs())
+			parts[idx].Inputs[input] = [2]int{inputIdx, outputIdx}
 			clone.circuit.SetParts(parts)
 		default:
 			outputs := clone.circuit.GetOutputs()
-			idx = frand.Intn(len(outputs))
-			outputs[idx].Inputs[0] = frand.Intn(clone.circuit.NParts())
+			idx := frand.Intn(len(outputs))
+			inputIdx := frand.Intn(clone.circuit.NParts())
+			outputIdx := frand.Intn(clone.circuit.GetParts()[inputIdx].Part.NOutputs())
+			outputs[idx].Inputs[0] = [2]int{inputIdx, outputIdx}
 			clone.circuit.SetOutputs(outputs)
 		}
 
@@ -631,6 +673,11 @@ func RandomIndividual(factory *CircuitPartFactory, nInputs, nOutputs int) *Indiv
 	newPartChance := 0.25
 
 	circuit := crt.NewCircuit(nInputs, nOutputs)
+	var parts []crt.CircuitPart
+
+	for _, part := range circuit.GetParts() {
+		parts = append(parts, part.Part)
+	}
 
 	for {
 		if frand.Float64() > newPartChance && circuit.NParts() > nInputs {
@@ -638,17 +685,22 @@ func RandomIndividual(factory *CircuitPartFactory, nInputs, nOutputs int) *Indiv
 		}
 
 		part := factory.RandomCircuitPart()
-		var partInputs []int
+		var partInputs [][2]int
 
 		for i := 0; i < part.NInputs(); i++ {
-			partInputs = append(partInputs, frand.Intn(circuit.NParts()))
+			inputIdx := frand.Intn(circuit.NParts())
+			outputIdx := frand.Intn(parts[inputIdx].NOutputs())
+			partInputs = append(partInputs, [2]int{inputIdx, outputIdx})
 		}
 
 		circuit.AddPart(part, partInputs...)
+		parts = append(parts, part)
 	}
 
 	for i := 0; i < nOutputs; i++ {
-		circuit.SetOutputInput(i, frand.Intn(circuit.NParts()))
+		inputIdx := frand.Intn(circuit.NParts())
+		outputIdx := frand.Intn(parts[inputIdx].NOutputs())
+		circuit.SetOutputInput(i, inputIdx, outputIdx)
 	}
 
 	return &Individual{circuit: circuit}

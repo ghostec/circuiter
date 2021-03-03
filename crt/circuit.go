@@ -1,62 +1,105 @@
 package crt
 
 import (
+	"encoding/json"
 	"errors"
 )
 
 type Circuit struct {
 	nInputs, nOutputs int
-	parts, outputs    []CircuitPartWithInputs
+	parts, outputs    []CircuitPartWithConnections
 }
 
 func NewCircuit(nInputs, nOutputs int) *Circuit {
-	var parts []CircuitPartWithInputs
+	var parts []CircuitPartWithConnections
 
 	for i := 0; i < nInputs; i++ {
-		parts = append(parts, CircuitPartWithInputs{Part: Buffer})
+		parts = append(parts, CircuitPartWithConnections{Part: Buffer})
 	}
 
-	var outputs []CircuitPartWithInputs
+	var outputs []CircuitPartWithConnections
 
 	for i := 0; i < nOutputs; i++ {
-		outputs = append(outputs, CircuitPartWithInputs{Part: Buffer})
+		outputs = append(outputs, CircuitPartWithConnections{Part: Buffer})
 	}
 
 	return &Circuit{nInputs: nInputs, nOutputs: nOutputs, parts: parts, outputs: outputs}
 }
 
+// TODO: override MarshalJSON interface of Circuit
+// and of Part (_OR, etc)
+// then
+// 1. try to solve sum2bits
+// 2. try to use sum2bits circuit as a part
+// 3. try to solve sum4bits
+// 4. try new mate logic
+type circuit struct {
+	NInputs, NOutputs int
+	Parts, Outputs    []CircuitPartWithConnections
+}
+
+func (c *Circuit) Save(path string) error {
+	cc := circuit{
+		NInputs:  c.nInputs,
+		NOutputs: c.nOutputs,
+		Parts:    c.parts,
+		Outputs:  c.outputs,
+	}
+	b, err := json.Marshal(cc)
+	if err != nil {
+		return err
+	}
+	println(string(b))
+	return nil
+}
+
+func Load(path string) (*Circuit, error) {
+	return nil, nil
+}
+
 func (c *Circuit) Evaluate(input []Bit) []Bit {
-	results := make([]Bit, len(c.parts)+len(c.outputs))
+	results := make([][]Bit, len(c.parts)+len(c.outputs))
+	for i := range results[:len(c.parts)] {
+		results[i] = make([]Bit, c.parts[i].Part.NOutputs())
+	}
+	for i := range results[len(c.parts):] {
+		results[i] = make([]Bit, c.outputs[i].Part.NOutputs())
+	}
 
 	for i, bit := range input {
-		results[i] = bit
+		results[i][0] = bit
 	}
 
 	for i := c.nInputs; i < len(c.parts); i++ {
 		var partInput []Bit
-		for _, iidx := range c.parts[i].Inputs {
-			partInput = append(partInput, results[iidx])
+		for _, idxs := range c.parts[i].Inputs {
+			partInput = append(partInput, results[idxs[0]][idxs[1]])
 		}
 
 		results[i] = c.parts[i].Part.Value(partInput...)
 	}
 
 	for i := range c.outputs {
-		results[len(c.parts)+i] = results[c.outputs[i].Inputs[0]]
+		results[len(c.parts)+i] = results[c.outputs[i].Inputs[0][0]]
 	}
 
-	return results[len(c.parts):]
+	flat := make([]Bit, len(c.outputs))
+	for i := range flat {
+		flat[i] = results[len(c.parts)+i][0]
+	}
+
+	return flat
 }
 
 func (c *Circuit) Clone() *Circuit {
 	clone := NewCircuit(c.nInputs, c.nOutputs)
 
-	clone.parts = make([]CircuitPartWithInputs, len(c.parts))
+	clone.parts = make([]CircuitPartWithConnections, len(c.parts))
 	for i, cp := range c.parts {
 		clone.parts[i] = cp.Clone()
 	}
 
-	clone.outputs = make([]CircuitPartWithInputs, len(c.outputs))
+	clone.outputs = make([]CircuitPartWithConnections, len(c.outputs))
 	for i, co := range c.outputs {
 		clone.outputs[i] = co.Clone()
 	}
@@ -67,18 +110,21 @@ func (c *Circuit) Clone() *Circuit {
 func (c *Circuit) NInputs() int  { return c.nInputs }
 func (c *Circuit) NOutputs() int { return c.nOutputs }
 
-func (c *Circuit) SetOutputInput(oidx, iidx int) {
-	c.outputs[oidx].Inputs = []int{iidx}
+// oidx = output idx
+// iidx = input idx
+// ioidx = input->output idx
+func (c *Circuit) SetOutputInput(oidx, iidx, ioidx int) {
+	c.outputs[oidx].Inputs = [][2]int{{iidx, ioidx}}
 }
 
-func (c *Circuit) AddPart(part CircuitPart, inputs ...int) error {
-	for _, idx := range inputs {
-		if idx >= len(c.parts) {
+func (c *Circuit) AddPart(part CircuitPart, inputs ...[2]int) error {
+	for _, idxs := range inputs {
+		if idxs[0] >= len(c.parts) {
 			return errors.New("circuit: invalid part inputs")
 		}
 	}
 
-	c.parts = append(c.parts, CircuitPartWithInputs{
+	c.parts = append(c.parts, CircuitPartWithConnections{
 		Part:   part,
 		Inputs: inputs,
 	})
@@ -86,23 +132,23 @@ func (c *Circuit) AddPart(part CircuitPart, inputs ...int) error {
 	return nil
 }
 
-func (c *Circuit) GetParts() (dst []CircuitPartWithInputs) {
-	dst = make([]CircuitPartWithInputs, len(c.parts))
+func (c *Circuit) GetParts() (dst []CircuitPartWithConnections) {
+	dst = make([]CircuitPartWithConnections, len(c.parts))
 	copy(dst, c.parts)
 	return
 }
 
-func (c *Circuit) SetParts(parts []CircuitPartWithInputs) {
+func (c *Circuit) SetParts(parts []CircuitPartWithConnections) {
 	c.parts = parts
 }
 
-func (c *Circuit) GetOutputs() (dst []CircuitPartWithInputs) {
-	dst = make([]CircuitPartWithInputs, len(c.outputs))
+func (c *Circuit) GetOutputs() (dst []CircuitPartWithConnections) {
+	dst = make([]CircuitPartWithConnections, len(c.outputs))
 	copy(dst, c.outputs)
 	return
 }
 
-func (c *Circuit) SetOutputs(outputs []CircuitPartWithInputs) {
+func (c *Circuit) SetOutputs(outputs []CircuitPartWithConnections) {
 	c.outputs = outputs
 }
 
@@ -110,26 +156,28 @@ func (c *Circuit) NParts() int {
 	return len(c.parts)
 }
 
-type CircuitPartWithInputs struct {
+type CircuitPartWithConnections struct {
 	Part CircuitPart
 	// inputs indexes
-	// must be less than the index of the part itself
-	Inputs []int
+	// 0: gate index; must be less than the index of the part itself
+	// 1: gate output index
+	Inputs [][2]int
 }
 
-func (p CircuitPartWithInputs) Clone() CircuitPartWithInputs {
-	inputs := make([]int, len(p.Inputs))
+func (p CircuitPartWithConnections) Clone() CircuitPartWithConnections {
+	inputs := make([][2]int, len(p.Inputs))
 	copy(inputs, p.Inputs)
 
-	return CircuitPartWithInputs{
+	return CircuitPartWithConnections{
 		Part:   p.Part,
 		Inputs: inputs,
 	}
 }
 
 type CircuitPart interface {
-	Value(...Bit) Bit
+	Value(...Bit) []Bit
 	NInputs() int
+	NOutputs() int
 }
 
 type Bit uint8
@@ -166,17 +214,18 @@ var (
 	Buffer = _Buffer{}
 )
 
-func (_Buffer) Value(inputs ...Bit) Bit {
+func (_Buffer) Value(inputs ...Bit) []Bit {
 	if len(inputs) != 1 {
 		panic("Buffer: must have 1 input")
 	}
 
-	return inputs[0]
+	return []Bit{inputs[0]}
 }
 
-func (_Buffer) NInputs() int { return 1 }
+func (_Buffer) NInputs() int  { return 1 }
+func (_Buffer) NOutputs() int { return 1 }
 
-func (_OR) Value(inputs ...Bit) Bit {
+func (_OR) Value(inputs ...Bit) []Bit {
 	if len(inputs) != 2 {
 		panic("OR: must have 2 inputs")
 	}
@@ -184,15 +233,16 @@ func (_OR) Value(inputs ...Bit) Bit {
 	a, b := inputs[0], inputs[1]
 
 	if a == BitZero && b == BitZero {
-		return BitZero
+		return []Bit{BitZero}
 	}
 
-	return BitOne
+	return []Bit{BitOne}
 }
 
-func (_OR) NInputs() int { return 2 }
+func (_OR) NInputs() int  { return 2 }
+func (_OR) NOutputs() int { return 1 }
 
-func (_AND) Value(inputs ...Bit) Bit {
+func (_AND) Value(inputs ...Bit) []Bit {
 	if len(inputs) != 2 {
 		panic("AND: must have 2 inputs")
 	}
@@ -200,15 +250,16 @@ func (_AND) Value(inputs ...Bit) Bit {
 	a, b := inputs[0], inputs[1]
 
 	if a == BitOne && b == BitOne {
-		return BitOne
+		return []Bit{BitOne}
 	}
 
-	return BitZero
+	return []Bit{BitZero}
 }
 
-func (_AND) NInputs() int { return 2 }
+func (_AND) NInputs() int  { return 2 }
+func (_AND) NOutputs() int { return 1 }
 
-func (_NOT) Value(inputs ...Bit) Bit {
+func (_NOT) Value(inputs ...Bit) []Bit {
 	if len(inputs) != 1 {
 		panic("NOT: must have 1 input")
 	}
@@ -216,15 +267,16 @@ func (_NOT) Value(inputs ...Bit) Bit {
 	a := inputs[0]
 
 	if a == BitOne {
-		return BitZero
+		return []Bit{BitZero}
 	}
 
-	return BitOne
+	return []Bit{BitOne}
 }
 
-func (_NOT) NInputs() int { return 1 }
+func (_NOT) NInputs() int  { return 1 }
+func (_NOT) NOutputs() int { return 1 }
 
-func (_XOR) Value(inputs ...Bit) Bit {
+func (_XOR) Value(inputs ...Bit) []Bit {
 	if len(inputs) != 2 {
 		panic("XOR: must have 2 inputs")
 	}
@@ -232,14 +284,15 @@ func (_XOR) Value(inputs ...Bit) Bit {
 	a, b := inputs[0], inputs[1]
 
 	if a == BitZero && b == BitZero {
-		return BitZero
+		return []Bit{BitZero}
 	}
 
 	if a == BitOne && b == BitOne {
-		return BitZero
+		return []Bit{BitZero}
 	}
 
-	return BitOne
+	return []Bit{BitOne}
 }
 
-func (_XOR) NInputs() int { return 2 }
+func (_XOR) NInputs() int  { return 2 }
+func (_XOR) NOutputs() int { return 1 }
